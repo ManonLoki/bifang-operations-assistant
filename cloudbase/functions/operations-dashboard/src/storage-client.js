@@ -114,8 +114,22 @@ function createCloudStorageReader(options = {}) {
     return results;
   }
 
+  async function writeJson(app, cloudPath, value) {
+    if (typeof app.uploadFile !== "function") {
+      return null;
+    }
+    const fileContent = Buffer.from(JSON.stringify(value), "utf8");
+    const result = await app.uploadFile({ cloudPath, fileContent });
+    if (result?.code) {
+      throw new Error(`cloudbase_storage_upload_failed:${result.code}`);
+    }
+    rememberPrefixFromFileId(result?.fileID || result?.fileId, cloudPath);
+    return result;
+  }
+
   return {
     readJsonBatch,
+    writeJson,
   };
 }
 

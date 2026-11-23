@@ -32,6 +32,7 @@ function createFakeStorageApp(initialFiles) {
   const files = new Map(Object.entries(initialFiles));
   let tempUrlCalls = 0;
   let fetchCalls = 0;
+  let uploadCalls = 0;
   let databaseCalls = 0;
   const prefix = "cloud://test-env.bucket-123/";
 
@@ -42,6 +43,11 @@ function createFakeStorageApp(initialFiles) {
     },
     async getUploadMetadata({ cloudPath }) {
       return { data: { fileId: `${prefix}${cloudPath}` } };
+    },
+    async uploadFile({ cloudPath, fileContent }) {
+      uploadCalls += 1;
+      files.set(cloudPath, JSON.parse(fileContent.toString("utf8")));
+      return { fileID: `${prefix}${cloudPath}` };
     },
     async getTempFileURL({ fileList }) {
       tempUrlCalls += 1;
@@ -87,7 +93,8 @@ function createFakeStorageApp(initialFiles) {
   return {
     app,
     fakeFetch,
-    counts: () => ({ tempUrlCalls, fetchCalls, databaseCalls }),
+    files,
+    counts: () => ({ tempUrlCalls, fetchCalls, uploadCalls, databaseCalls }),
   };
 }
 
@@ -218,4 +225,152 @@ test("看板 handler 在启用短缓存时 60 秒内复用聚合快照", async (
   now = new Date("2026-11-23T04:01:05.000Z");
   assert.equal((await handler(req)).statusCode, 200);
   assert.equal(readerCalls, 2);
+});
+
+test("看板读取器合并过渡期单文件与分片文件，并对历史天执行惰性归档", async () => {
+  const fake = createFakeStorageApp({
+    // 2026-11-22 历史天：既有旧单文件 evt-legacy，又有新分片 evt-shard-0 / evt-shard-2
+    "telemetry/bifang-tools/2026-11-22.json": {
+      schema_version: 1,
+      app_id: "bifang-tools",
+      active_date: "2026-11-22",
+      events: {
+        "evt-legacy": {
+          _id: "evt-legacy",
+          schema_version: 2,
+          event: "daily_active",
+          app_id: "bifang-tools",
+          app_version: "1.0.0",
+          install_id: "11111111-1111-4111-8111-111111111111",
+          platform: "windows",
+          arch: "x64",
+          active_date: "2026-11-22",
+          received_at: "2026-11-22T02:00:00.000Z",
+        },
+      },
+    },
+    "telemetry/bifang-tools/2026-11-22/manifest.json": {
+      schema_version: 2,
+      app_id: "bifang-tools",
+      active_date: "2026-11-22",
+      shard_count: 4,
+    },
+    "telemetry/bifang-tools/2026-11-22/shard-00.json": {
+      schema_version: 2,
+      app_id: "bifang-tools",
+      active_date: "2026-11-22",
+      shard: 0,
+      shard_count: 4,
+      events: {
+        "evt-shard-0": {
+          _id: "evt-shard-0",
+          schema_version: 2,
+          event: "daily_active",
+          app_id: "bifang-tools",
+          app_version: "1.0.0",
+          install_id: "22222222-2222-4222-8222-222222222222",
+          platform: "windows",
+          arch: "x64",
+          active_date: "2026-11-22",
+          received_at: "2026-11-22T05:00:00.000Z",
+        },
+      },
+    },
+    "telemetry/bifang-tools/2026-11-22/shard-02.json": {
+      schema_version: 2,
+      app_id: "bifang-tools",
+      active_date: "2026-11-22",
+      shard: 2,
+      shard_count: 4,
+      events: {
+        "evt-shard-2": {
+          _id: "evt-shard-2",
+          schema_version: 2,
+          event: "daily_active",
+          app_id: "bifang-tools",
+          app_version: "1.0.1",
+          install_id: "33333333-3333-4333-8333-333333333333",
+          platform: "macos",
+          arch: "arm64",
+          active_date: "2026-11-22",
+          received_at: "2026-11-22T08:00:00.000Z",
+        },
+      },
+    },
+    // 2026-11-23 当天：仅分片存在，不应触发归档
+    "telemetry/bifang-tools/2026-11-23/manifest.json": {
+      schema_version: 2,
+      app_id: "bifang-tools",
+      active_date: "2026-11-23",
+      shard_count: 4,
+    },
+    "telemetry/bifang-tools/2026-11-23/shard-01.json": {
+      schema_version: 2,
+      app_id: "bifang-tools",
+      active_date: "2026-11-23",
+      shard: 1,
+      shard_count: 4,
+      events: {
+        "evt-today": {
+          _id: "evt-today",
+          schema_version: 2,
+          event: "daily_active",
+          app_id: "bifang-tools",
+          app_version: "1.1.0",
+          install_id: "44444444-4444-4444-8444-444444444444",
+          platform: "windows",
+          arch: "x64",
+          active_date: "2026-11-23",
+          received_at: "2026-11-23T03:00:00.000Z",
+        },
+      },
+    },
+  });
+
+  const readerFirst = createCloudBaseEventReader({
+    appFactory: () => fake.app,
+    fetch: fake.fakeFetch,
+    nowMs: () => Date.parse("2026-11-23T04:00:00.000Z"),
+  });
+
+  const events = await readerFirst({
+    apps: APPS,
+    startDate: "2026-11-22",
+    endDate: "2026-11-23",
+    receivedBefore: "2026-11-23T04:00:00.000Z",
+  });
+  assert.deepEqual(events.map((item) => item._id).sort(), [
+    "evt-legacy",
+    "evt-shard-0",
+    "evt-shard-2",
+    "evt-today",
+  ]);
+  // 历史天 2026-11-22 已被惰性归档回单文件，当天 2026-11-23 不归档
+  assert.equal(fake.counts().uploadCalls, 1);
+  const compacted = fake.files.get("telemetry/bifang-tools/2026-11-22.json");
+  assert.equal(compacted.compacted, true);
+  assert.deepEqual(Object.keys(compacted.events).sort(), [
+    "evt-legacy",
+    "evt-shard-0",
+    "evt-shard-2",
+  ]);
+  assert.equal(fake.files.has("telemetry/bifang-tools/2026-11-23.json"), false);
+
+  // 冷启动新 reader 实例（无内存缓存）读取历史天时，直接命中 compacted 单文件，仅 1 次 fetch
+  const fetchBeforeColdRead = fake.counts().fetchCalls;
+  const coldReader = createCloudBaseEventReader({
+    appFactory: () => fake.app,
+    fetch: fake.fakeFetch,
+    nowMs: () => Date.parse("2026-11-23T05:00:00.000Z"),
+  });
+  const historyOnly = await coldReader({
+    apps: APPS,
+    startDate: "2026-11-22",
+    endDate: "2026-11-23",
+    receivedBefore: "2026-11-23T05:00:00.000Z",
+  });
+  assert.equal(historyOnly.length, 4);
+  // 仅 fetch 了：2026-11-22.json (1) + 2026-11-23/manifest.json (1) + 2026-11-23/shard-01.json (1) = 3 次
+  assert.equal(fake.counts().fetchCalls - fetchBeforeColdRead, 3);
+  assert.equal(fake.counts().uploadCalls, 1);
 });

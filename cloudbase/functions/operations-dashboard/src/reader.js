@@ -11,6 +11,8 @@ const MAX_PAGES_PER_COLLECTION = 100;
 const STORAGE_BACKEND_STORAGE = "storage";
 const STORAGE_BACKEND_DATABASE = "database";
 const HISTORICAL_DAY_CACHE_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_STORAGE_SHARDS = 16;
+const MAX_STORAGE_SHARDS = 64;
 
 function createCloudBaseEventReader(options = {}) {
   const appFactory = options.appFactory || createDefaultCloudBaseApp;
@@ -130,16 +132,16 @@ async function readEventsFromStorage({
   storageReader,
 }) {
   const dates = enumerateDateRange(startDate, endDate);
-  const pathsToFetch = [];
+  const uncachedItems = [];
   const entries = [];
   const currentMs = nowMs();
 
   for (const targetApp of apps) {
     for (const date of dates) {
-      const cloudPath = `telemetry/${targetApp.appId}/${date}.json`;
+      const dailyPath = telemetryDailyCloudPath(targetApp.appId, date);
       const isHistorical = date < endDate;
       if (isHistorical && historicalCacheTtlMs > 0) {
-        const cached = historicalCache.get(cloudPath);
+        const cached = historicalCache.get(dailyPath);
         if (cached && currentMs - cached.loadedAt < historicalCacheTtlMs) {
           entries.push({
             appId: targetApp.appId,
@@ -149,26 +151,129 @@ async function readEventsFromStorage({
           continue;
         }
       }
-      pathsToFetch.push({
+      uncachedItems.push({
         appId: targetApp.appId,
-        cloudPath,
+        dailyPath,
+        manifestPath: telemetryManifestCloudPath(targetApp.appId, date),
         date,
         isHistorical,
       });
     }
   }
 
-  if (pathsToFetch.length > 0) {
-    const fetched = await storageReader.readJsonBatch(
+  if (uncachedItems.length > 0) {
+    // 阶段 1：优先批量读取单日文件（已归档历史天和升级前老数据在此一步命中）
+    const dailyMap = await storageReader.readJsonBatch(
       app,
-      pathsToFetch.map((item) => item.cloudPath),
+      uncachedItems.map((item) => item.dailyPath),
     );
-    for (const item of pathsToFetch) {
-      const payload = fetched.get(item.cloudPath) ?? null;
-      if (item.isHistorical && historicalCacheTtlMs > 0) {
-        historicalCache.set(item.cloudPath, { loadedAt: currentMs, payload });
+
+    const needsManifestCheck = [];
+    for (const item of uncachedItems) {
+      const dailyPayload = dailyMap.get(item.dailyPath) ?? null;
+      item.dailyPayload = dailyPayload;
+      if (item.isHistorical && dailyPayload?.compacted === true) {
+        if (historicalCacheTtlMs > 0) {
+          historicalCache.set(item.dailyPath, {
+            loadedAt: currentMs,
+            payload: dailyPayload,
+          });
+        }
+        entries.push({
+          appId: item.appId,
+          date: item.date,
+          payload: dailyPayload,
+        });
+      } else {
+        needsManifestCheck.push(item);
       }
-      entries.push({ appId: item.appId, date: item.date, payload });
+    }
+
+    // 阶段 2：对未归档的日期探测是否存在分片 manifest.json
+    const manifestMap =
+      needsManifestCheck.length > 0
+        ? await storageReader.readJsonBatch(
+            app,
+            needsManifestCheck.map((item) => item.manifestPath),
+          )
+        : new Map();
+
+    const shardPathsToFetch = [];
+    const shardedItems = [];
+    for (const item of needsManifestCheck) {
+      const manifest = manifestMap.get(item.manifestPath) ?? null;
+      if (!manifest || typeof manifest !== "object") {
+        // 无分片：直接使用单日文件（兼容旧版或空天）
+        if (item.isHistorical && historicalCacheTtlMs > 0) {
+          historicalCache.set(item.dailyPath, {
+            loadedAt: currentMs,
+            payload: item.dailyPayload,
+          });
+        }
+        entries.push({
+          appId: item.appId,
+          date: item.date,
+          payload: item.dailyPayload,
+        });
+        continue;
+      }
+      const shardCount = normalizeShardCount(manifest.shard_count);
+      const shardPaths = [];
+      for (let shard = 0; shard < shardCount; shard += 1) {
+        const shardPath = telemetryShardCloudPath(item.appId, item.date, shard);
+        shardPaths.push(shardPath);
+        shardPathsToFetch.push(shardPath);
+      }
+      item.shardCount = shardCount;
+      item.shardPaths = shardPaths;
+      shardedItems.push(item);
+    }
+
+    // 阶段 3：批量读取所有已存在 manifest 的分片，并与旧单日文件合并去重
+    const shardMap =
+      shardPathsToFetch.length > 0
+        ? await storageReader.readJsonBatch(app, shardPathsToFetch)
+        : new Map();
+
+    const compactTasks = [];
+    for (const item of shardedItems) {
+      const mergedEvents = mergeStorageEventPayloads([
+        item.dailyPayload,
+        ...item.shardPaths.map((shardPath) => shardMap.get(shardPath) ?? null),
+      ]);
+      const mergedPayload = {
+        schema_version: 2,
+        app_id: item.appId,
+        active_date: item.date,
+        compacted: item.isHistorical,
+        shard_count: item.shardCount,
+        updated_at: new Date(currentMs).toISOString(),
+        events: mergedEvents,
+      };
+      if (item.isHistorical) {
+        if (historicalCacheTtlMs > 0) {
+          historicalCache.set(item.dailyPath, {
+            loadedAt: currentMs,
+            payload: mergedPayload,
+          });
+        }
+        if (typeof storageReader.writeJson === "function") {
+          compactTasks.push(
+            storageReader
+              .writeJson(app, item.dailyPath, mergedPayload)
+              .catch(() => null),
+          );
+        }
+      }
+      entries.push({
+        appId: item.appId,
+        date: item.date,
+        payload: mergedPayload,
+      });
+    }
+
+    if (compactTasks.length > 0) {
+      await Promise.all(compactTasks);
     }
   }
 
@@ -206,6 +311,48 @@ async function readEventsFromStorage({
   }
 
   return allEvents;
+}
+
+function mergeStorageEventPayloads(payloads) {
+  const merged = {};
+  for (const payload of payloads) {
+    const rows = extractStorageEventRows(payload);
+    for (const row of rows) {
+      if (!row || typeof row !== "object" || typeof row._id !== "string") {
+        continue;
+      }
+      const existing = merged[row._id];
+      if (
+        !existing ||
+        (typeof row.received_at === "string" &&
+          (typeof existing.received_at !== "string" ||
+            row.received_at > existing.received_at))
+      ) {
+        merged[row._id] = row;
+      }
+    }
+  }
+  return merged;
+}
+
+function telemetryDailyCloudPath(appId, activeDate) {
+  return `telemetry/${appId}/${activeDate}.json`;
+}
+
+function telemetryManifestCloudPath(appId, activeDate) {
+  return `telemetry/${appId}/${activeDate}/manifest.json`;
+}
+
+function telemetryShardCloudPath(appId, activeDate, shardIndex) {
+  return `telemetry/${appId}/${activeDate}/shard-${String(shardIndex).padStart(2, "0")}.json`;
+}
+
+function normalizeShardCount(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > MAX_STORAGE_SHARDS) {
+    return DEFAULT_STORAGE_SHARDS;
+  }
+  return parsed;
 }
 
 function extractStorageEventRows(payload) {
