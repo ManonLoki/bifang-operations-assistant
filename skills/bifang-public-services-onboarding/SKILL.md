@@ -13,7 +13,7 @@ metadata:
 
 # 毕方公共服务接入向导
 
-按第一门禁确认的范围接入毕方基础设施 `3.0.0`：统计使用 `daily_active`，更新使用客户端更新中心 POST 协议。只有选择更新且获授权时，才删除该客户端旧静态更新和旧 application-version 客户端实现，不建立双协议、回退开关或长期兼容层；不要据此删除在线服务或其他客户端资源，也不改动未选择的服务。
+按第一门禁确认的范围接入毕方基础设施 `3.0.0`：统计使用 `daily_active`（CloudBase 云函数默认写 **CloudBase 云存储 COS + 热实例内存去重**，不再创建或访问 PostgreSQL 集合与 TTL 索引，避免 5 分钟 CU 计费）；更新支持继续使用 **CloudBase `/tools/version-control/v1`**（底层同样默认走云存储 + 5 分钟内存缓存，**不强制要求 `https://update.meetelf.com`**），也可在明确启用独立更新中心时按 `client-update-center-v1` POST 协议接入。只有选择更新且获授权时，才删除旧静态 `/updates` 清单实现；**不再强制删除正在使用的 CloudBase `application-version-api` 客户端实现**，也不改动未选择的服务。已接入的旧客户端随服务端云函数部署即可无感切到云存储，无需改客户端代码。
 
 若用户只要求整理规范、参数或 Skill，维护文档与必要契约校验，不运行真实 OAuth/配置请求或业务实施。先读 [统一接入契约](references/integration-contract.md) 的授权中心设备流程、精确配置字段、默认值及日活合同，再读 [Updater 完整合同](references/client-update-center.md)。配置查询 OAuth 已定义，不能与下游 ClientToken 或更新快照期限混淆；真实生产入口、客户端登记和 Endpoint 语义按部署资料核验，不要求客户补填已定义协议。
 
@@ -167,7 +167,7 @@ python <skill-root>/scripts/validate_profile.py .bifang/public-services-profile.
 python <skill-root>/scripts/derive_resources.py --profile .bifang/public-services-profile.json
 ```
 
-Windows 使用 `py -3 -X utf8 -B`。新接入 Profile v2 的 `update_transport` 固定为 `client-update-center-v1`；生产 `update_center_base_url` 为 `https://update.meetelf.com`，负责人明确要求本机联调时可使用 `http://127.0.0.1:8080/`。本地地址不能标记生产服务或客户端线上 E2E 已验证，也不能完成阶段 6/7；不要把生产 Token 用于本地测试。`update_targets` 记录每个 `os + architecture + installation_type + channel`，以当前进程架构而非硬件架构为准。`x64` 映射为 `x86_64`，Linux 必须从真实发行版确认 `ubuntu` 或 `debian`。旧 v2 Profile 可作为历史输入读取，但新接入必须去掉旧协议配置并通过 `--require-update-center`。
+Windows 使用 `py -3 -X utf8 -B`。新接入 Profile v2 默认支持 CloudBase `/tools/version-control/v1`（不强制要求 `https://update.meetelf.com`）；仅当明确接入独立更新中心时，才将 `update_transport` 设为 `client-update-center-v1` 并通过 `--require-update-center` 校验（生产 `update_center_base_url` 按授权中心配置核验，本机联调可用 `http://127.0.0.1:8080/`）。本地地址不能标记生产服务或客户端线上 E2E 已验证，也不能完成阶段 6/7；不要把生产 Token 用于本地测试。`update_targets` 记录每个 `os + architecture + installation_type + channel`，以当前进程架构而非硬件架构为准。`x64` 映射为 `x86_64`，Linux 必须从真实发行版确认 `ubuntu` 或 `debian`。CloudBase 后端存储默认走云存储（COS），不再将 PostgreSQL 集合创建作为阶段 4 或线上 E2E 的前置门禁。
 
 Profile 只记录 `update_center_auth_status` 和已确认的 `offline_enforcement`，不记录 Token、凭据摘要或下载临时链接。`service-default` 遵循服务端强更缓存期限；`persist-until-resolved` 是产品明确要求的离线强更例外，不能未经确认套用到其他工具。
 

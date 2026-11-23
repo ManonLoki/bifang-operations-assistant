@@ -11,8 +11,11 @@ const {
   validateVersionWrite,
 } = require("./validation");
 const { createVersionSortKey } = require("./version");
+const { createCloudStorageRepository } = require("./storage-repository");
 
 const COLLECTION_PATTERN = /^[a-z][a-z0-9_]{0,59}$/;
+const STORAGE_BACKEND_STORAGE = "storage";
+const STORAGE_BACKEND_DATABASE = "database";
 
 function parseApplicationResources(value) {
   let parsed = value;
@@ -73,13 +76,58 @@ function createCloudBaseRepository(options = {}) {
   if (!resources) throw new TypeError("invalid application version resources");
   const byAppId = new Map(resources.map((item) => [item.appId, item]));
   const appFactory = options.appFactory || createDefaultCloudBaseApp;
+  const configuredBackend = normalizeStorageBackend(
+    options.storageBackend === undefined
+      ? process.env.STORAGE_BACKEND
+      : options.storageBackend,
+  );
+  let appInstance;
   let database;
+  let storageRepository;
+
+  function getApp() {
+    if (!appInstance) {
+      appInstance = appFactory({
+        runtimeContext: options.runtimeContext,
+      });
+    }
+    return appInstance;
+  }
+
+  function resolveBackend() {
+    if (configuredBackend === STORAGE_BACKEND_DATABASE) {
+      return STORAGE_BACKEND_DATABASE;
+    }
+    if (configuredBackend === STORAGE_BACKEND_STORAGE) {
+      return STORAGE_BACKEND_STORAGE;
+    }
+    const app = getApp();
+    return app &&
+      typeof app.uploadFile === "function" &&
+      typeof app.getTempFileURL === "function"
+      ? STORAGE_BACKEND_STORAGE
+      : STORAGE_BACKEND_DATABASE;
+  }
+
+  function getStorageRepository() {
+    if (!storageRepository) {
+      storageRepository = createCloudStorageRepository({
+        appFactory: () => getApp(),
+        byAppId,
+        cache: options.cache,
+        cacheTtlMs: options.cacheTtlMs,
+        fetch: options.fetch,
+        now: options.now,
+        runtimeContext: options.runtimeContext,
+        storagePrefix: options.storagePrefix,
+      });
+    }
+    return storageRepository;
+  }
 
   function getDatabase() {
     if (!database) {
-      database = appFactory({
-        runtimeContext: options.runtimeContext,
-      }).database();
+      database = getApp().database();
     }
     return database;
   }
@@ -90,7 +138,7 @@ function createCloudBaseRepository(options = {}) {
     return value;
   }
 
-  return {
+  const databaseRepository = {
     async createVersion(appId, record, audit) {
       const resource = select(appId);
       const database = getDatabase();
@@ -307,6 +355,38 @@ function createCloudBaseRepository(options = {}) {
       return readRows(result).map(fromAdDocument);
     },
   };
+
+  function target() {
+    return resolveBackend() === STORAGE_BACKEND_STORAGE
+      ? getStorageRepository()
+      : databaseRepository;
+  }
+
+  return {
+    createVersion: (...args) => target().createVersion(...args),
+    updateVersion: (...args) => target().updateVersion(...args),
+    listVersions: (...args) => target().listVersions(...args),
+    listVersionsForCode: (...args) => target().listVersionsForCode(...args),
+    createAd: (...args) => target().createAd(...args),
+    updateAd: (...args) => target().updateAd(...args),
+    deleteAd: (...args) => target().deleteAd(...args),
+    getAd: (...args) => target().getAd(...args),
+    listAds: (...args) => target().listAds(...args),
+    showAds: (...args) => target().showAds(...args),
+  };
+}
+
+function normalizeStorageBackend(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === STORAGE_BACKEND_STORAGE ||
+    normalized === STORAGE_BACKEND_DATABASE
+  ) {
+    return normalized;
+  }
+  return null;
 }
 
 function toVersionDocument(record) {

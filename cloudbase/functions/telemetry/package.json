@@ -9,7 +9,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "node --check index.js && node --check src/burst-guard.js && node --check src/handler.js && node --check src/validation.js && node --check src/writer.js",
+    "build": "node --check index.js && node --check src/burst-guard.js && node --check src/handler.js && node --check src/storage-client.js && node --check src/validation.js && node --check src/writer.js",
     "check": "npm run build",
     "test": "node --test test/*.test.js"
   },

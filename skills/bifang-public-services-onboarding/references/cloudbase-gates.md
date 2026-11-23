@@ -18,18 +18,22 @@
 
 ## 固定资源
 
+CloudBase 后端存储默认统一使用 **CloudBase 云存储（COS）+ 热实例内存缓存**，**不再新建或访问 PostgreSQL 集合与 TTL 索引**（避免共享实例 5 分钟 CU 计费；仅当显式设置 `STORAGE_BACKEND=database` 时回退数据库）。
+
 Telemetry 每个应用独立：
 
-- `telemetry-<app_id>`
-- `/apps/<app_id>/v1/track`
-- `telemetry_<normalized_app_id>`，`ADMINONLY`
+- 函数：`telemetry-<app_id>`
+- 路由：`/apps/<app_id>/v1/track`
+- 云存储路径：`telemetry/<app_id>/<active_date>.json`（热实例内存去重，无需 PostgreSQL 集合或 TTL 索引）
 
 Application-version 全环境共享：
 
-- 函数 `application-version-api`
-- 路由 `/tools/version-control/v1`
-- 每 APP_ID 独立 `versions_*`、`ads_*`、`audit_*`，均 `ADMINONLY`
-- 凭据绑定 `app_id + codes + scopes`
+- 函数：`application-version-api`
+- 路由：`/tools/version-control/v1`
+- 云存储路径：每 APP_ID 独立 `version-control/<app_id>/versions.json`、`ads.json`、`audit.json`（读接口 5 分钟内存缓存，写接口强读并刷新缓存）
+- 凭据绑定：`app_id + codes + scopes`
+
+历史 PostgreSQL 集合（`telemetry_*`、`versions_*`、`ads_*`、`audit_*`）在云函数全面切到云存储后可按负责人授权直接清理释放存储占用；不删除 CloudBase 环境本身。
 
 不存在静态更新 hosting 或现行 `/updates` 路由。旧静态资源只作为待精确退役的线上候选，不得重新生成或部署。
 

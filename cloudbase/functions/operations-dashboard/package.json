@@ -9,7 +9,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "node --check index.js && node --check src/aggregate.js && node --check src/app-labels.js && node --check src/handler.js && node --check src/web.js && node --check src/reader.js && node --check src/version-reader.js && node --check src/validation.js && node --check src/diagnostics.js && node --check public/app.js",
+    "build": "node --check index.js && node --check src/aggregate.js && node --check src/app-labels.js && node --check src/handler.js && node --check src/web.js && node --check src/reader.js && node --check src/storage-client.js && node --check src/version-reader.js && node --check src/validation.js && node --check src/diagnostics.js && node --check public/app.js",
     "check": "npm run build",
     "test": "node --test test/*.test.js"
   },

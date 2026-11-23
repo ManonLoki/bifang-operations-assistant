@@ -1,13 +1,18 @@
 "use strict";
 
+const {
+  createCloudStorageClient,
+  createDailySeenCache,
+} = require("./storage-client");
+
 const COLLECTION_NAME_PATTERN = /^[a-z][a-z0-9_]{0,59}$/;
+const STORAGE_BACKEND_STORAGE = "storage";
+const STORAGE_BACKEND_DATABASE = "database";
 
 /**
- * Creates the production CloudBase writer without loading the SDK or opening a
- * database connection until the first accepted event. The handler supplies a
- * deterministic daily-active _id; CloudBase's built-in uniqueness therefore
- * deduplicates the same app installation on the same Shanghai calendar day.
- * A duplicate insert is treated as an already accepted event.
+ * 创建生产环境遥测写入器：
+ * - 默认优先走 CloudBase 云存储（按应用与北京日期分文件 + 热实例内存去重），避免触发 PostgreSQL 5 分钟 CU 计费；
+ * - 可通过 STORAGE_BACKEND=database 回退到原数据库集合写入。
  */
 function createCloudBaseWriter(options = {}) {
   const collectionName = normalizeCollectionName(
@@ -15,8 +20,28 @@ function createCloudBaseWriter(options = {}) {
       ? process.env.TELEMETRY_COLLECTION
       : options.collectionName,
   );
+  const configuredBackend = normalizeStorageBackend(
+    options.storageBackend === undefined
+      ? process.env.STORAGE_BACKEND
+      : options.storageBackend,
+  );
   const appFactory = options.appFactory || createDefaultCloudBaseApp;
+  const storageClient =
+    options.storageClient ||
+    createCloudStorageClient({
+      fetch: options.fetch,
+      storagePrefix: options.storagePrefix,
+    });
+  const seenCache = options.seenCache || createDailySeenCache();
+  let appPromise;
   let collection;
+
+  async function getApp() {
+    if (!appPromise) {
+      appPromise = Promise.resolve(appFactory());
+    }
+    return appPromise;
+  }
 
   return async function writeEvent(document) {
     if (
@@ -31,8 +56,32 @@ function createCloudBaseWriter(options = {}) {
       throw new Error("telemetry_collection_not_configured");
     }
 
+    const activeDate =
+      typeof document.active_date === "string" && document.active_date
+        ? document.active_date
+        : null;
+    if (
+      configuredBackend !== STORAGE_BACKEND_DATABASE &&
+      activeDate &&
+      seenCache.has(activeDate, document._id)
+    ) {
+      return { duplicate: true, cached: true };
+    }
+
+    const app = await getApp();
+    const useStorage = shouldUseStorageBackend(configuredBackend, app);
+
+    if (useStorage) {
+      return writeEventToStorage({
+        app,
+        collectionName,
+        document,
+        seenCache,
+        storageClient,
+      });
+    }
+
     if (!collection) {
-      const app = await appFactory();
       collection = app.database().collection(collectionName);
     }
 
@@ -46,6 +95,90 @@ function createCloudBaseWriter(options = {}) {
       throw error;
     }
   };
+}
+
+async function writeEventToStorage({
+  app,
+  collectionName,
+  document,
+  seenCache,
+  storageClient,
+}) {
+  const appId =
+    typeof document.app_id === "string" && document.app_id
+      ? document.app_id
+      : collectionName.replace(/^telemetry_/, "").replaceAll("_", "-");
+  const activeDate = document.active_date;
+  if (
+    typeof activeDate !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(activeDate)
+  ) {
+    throw new TypeError("document.active_date must be YYYY-MM-DD");
+  }
+
+  const cloudPath = telemetryDailyCloudPath(appId, activeDate);
+  const existing = await storageClient.readJson(app, cloudPath);
+  const events =
+    existing &&
+    typeof existing === "object" &&
+    existing.events &&
+    typeof existing.events === "object" &&
+    !Array.isArray(existing.events)
+      ? { ...existing.events }
+      : {};
+
+  if (Object.hasOwn(events, document._id)) {
+    seenCache.add(activeDate, document._id);
+    return { duplicate: true };
+  }
+
+  events[document._id] = serializeTelemetryDocument(document);
+  await storageClient.writeJson(app, cloudPath, {
+    schema_version: 1,
+    app_id: appId,
+    active_date: activeDate,
+    updated_at: document.received_at || new Date().toISOString(),
+    events,
+  });
+  seenCache.add(activeDate, document._id);
+  return { duplicate: false };
+}
+
+function telemetryDailyCloudPath(appId, activeDate) {
+  return `telemetry/${appId}/${activeDate}.json`;
+}
+
+function serializeTelemetryDocument(document) {
+  return {
+    ...document,
+    expires_at:
+      document.expires_at instanceof Date
+        ? document.expires_at.toISOString()
+        : document.expires_at,
+  };
+}
+
+function normalizeStorageBackend(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === STORAGE_BACKEND_STORAGE ||
+    normalized === STORAGE_BACKEND_DATABASE
+  ) {
+    return normalized;
+  }
+  return null;
+}
+
+function shouldUseStorageBackend(configuredBackend, app) {
+  if (configuredBackend === STORAGE_BACKEND_DATABASE) return false;
+  if (configuredBackend === STORAGE_BACKEND_STORAGE) return true;
+  return Boolean(
+    app &&
+    typeof app.uploadFile === "function" &&
+    typeof app.getTempFileURL === "function",
+  );
 }
 
 function normalizeCollectionName(value) {
@@ -101,8 +234,12 @@ function isDuplicateWriteError(error) {
 
 module.exports = {
   COLLECTION_NAME_PATTERN,
+  STORAGE_BACKEND_DATABASE,
+  STORAGE_BACKEND_STORAGE,
   createCloudBaseWriter,
   createDefaultCloudBaseApp,
   isDuplicateWriteError,
   normalizeCollectionName,
+  normalizeStorageBackend,
+  telemetryDailyCloudPath,
 };

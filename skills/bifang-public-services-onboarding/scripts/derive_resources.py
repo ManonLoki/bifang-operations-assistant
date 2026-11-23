@@ -69,6 +69,11 @@ def derive_resources(
     }
     resources: dict[str, Any] = {
         "app_id": app_id,
+        "storage_backend": "storage",
+        "telemetry_storage_path_template": f"telemetry/{app_id}/{{active_date}}.json",
+        "version_storage_path": f"version-control/{app_id}/versions.json",
+        "ad_storage_path": f"version-control/{app_id}/ads.json",
+        "audit_storage_path": f"version-control/{app_id}/audit.json",
         "collection_name": f"telemetry_{normalized_app_id}",
         "function_name": f"telemetry-{app_id}",
         "platform_gates": platform_gates,
@@ -258,6 +263,8 @@ def main(argv: list[str] | None = None) -> int:
                     "app_id": app_id,
                     "display_name": profile["display_name"],
                     "dashboard_app_labels": {app_id: profile["display_name"]},
+                    "storage_backend": "storage",
+                    "telemetry_storage_path_template": f"telemetry/{app_id}/{{active_date}}.json",
                     "function_name": f"telemetry-{app_id}",
                     "collection_name": f"telemetry_{normalized}",
                     "telemetry_route": route,

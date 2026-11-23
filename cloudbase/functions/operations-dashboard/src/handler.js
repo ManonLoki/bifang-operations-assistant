@@ -47,6 +47,13 @@ function createHandler(options = {}) {
     options.versionReader || createCloudBaseVersionReader();
   const now = options.now || (() => new Date());
   const logger = options.logger || console;
+  const snapshotCache = options.snapshotCache || new Map();
+  const defaultCacheTtlMs =
+    options.reader || options.versionReader ? 0 : 60 * 1000;
+  const snapshotCacheTtlMs = resolveSnapshotCacheTtlMs(
+    options.cacheTtlMs,
+    defaultCacheTtlMs,
+  );
   const environmentId = normalizeEnvironmentId(
     options.environmentId === undefined
       ? process.env.CLOUDBASE_ENV_ID ||
@@ -76,6 +83,16 @@ function createHandler(options = {}) {
       ) {
         throw new Error("invalid_server_clock");
       }
+      const cacheKey = `${query.appId}:${query.days}`;
+      if (snapshotCacheTtlMs > 0) {
+        const cached = snapshotCache.get(cacheKey);
+        if (
+          cached &&
+          currentTime.getTime() - cached.cachedAt < snapshotCacheTtlMs
+        ) {
+          return jsonResponse(200, cached.snapshot);
+        }
+      }
       const selectedApps =
         query.appId === "all"
           ? apps
@@ -100,6 +117,12 @@ function createHandler(options = {}) {
         now: currentTime,
         selectedAppId: query.appId,
       });
+      if (snapshotCacheTtlMs > 0) {
+        snapshotCache.set(cacheKey, {
+          cachedAt: currentTime.getTime(),
+          snapshot,
+        });
+      }
       return jsonResponse(200, snapshot);
     } catch (error) {
       if (logger && typeof logger.error === "function") {
@@ -151,6 +174,14 @@ function createHandler(options = {}) {
       jsonResponse(404, { error: "not_found" })
     );
   };
+}
+
+function resolveSnapshotCacheTtlMs(override, fallback) {
+  const raw =
+    override === undefined ? process.env.DASHBOARD_CACHE_TTL_MS : override;
+  if (raw === undefined || raw === null || raw === "") return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function parseDashboardApps(value) {

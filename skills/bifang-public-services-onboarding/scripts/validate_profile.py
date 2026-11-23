@@ -321,7 +321,7 @@ def _validate_update_center_semantics(profile: dict[str, Any], errors: list[str]
     _validate_legacy_update_removal(profile, gates, errors)
     dependencies = {
         "telemetry_app_version_verified": ("profile_complete",),
-        "telemetry_app_version_online_verified": ("telemetry_app_version_verified", "function_deployed", "collection_admin_only", "route_deployed"),
+        "telemetry_app_version_online_verified": ("telemetry_app_version_verified", "function_deployed", "route_deployed"),
         "app_display_name_registered": ("profile_complete", "app_id_confirmed"),
         "dashboard_display_name_verified": ("app_registered", "app_display_name_registered", "cloudbase_config_reviewed"),
         "cloudbase_config_reviewed": ("app_registered",),
@@ -329,7 +329,7 @@ def _validate_update_center_semantics(profile: dict[str, Any], errors: list[str]
         "collection_created": ("cloudbase_config_reviewed",),
         "collection_admin_only": ("collection_created",),
         "route_deployed": ("function_deployed",),
-        "online_e2e_passed": ("function_deployed", "collection_created", "collection_admin_only", "route_deployed"),
+        "online_e2e_passed": ("function_deployed", "route_deployed"),
         "client_e2e_passed": ("client_integration_complete",),
     }
     for gate, required in dependencies.items():
@@ -340,7 +340,7 @@ def _validate_update_center_semantics(profile: dict[str, Any], errors: list[str]
     requirements = {
         2: ("profile_complete", "app_id_confirmed", "uses_existing_free_environment", "free_environment_confirmed"),
         3: ("app_registered", "app_display_name_registered"),
-        4: ("cloudbase_config_reviewed", "function_deployed", "collection_created", "collection_admin_only", "route_deployed", "online_e2e_passed", "dashboard_display_name_verified"),
+        4: ("cloudbase_config_reviewed", "function_deployed", "route_deployed", "online_e2e_passed", "dashboard_display_name_verified"),
         5: ("client_integration_complete", "telemetry_app_version_verified", "update_center_client_integrated", "legacy_client_update_removed"),
         6: ("client_integration_complete", "update_center_client_integrated", "update_center_service_verified", "runtime_auth_ready", "client_e2e_passed", "update_center_client_e2e_passed", "telemetry_app_version_online_verified"),
         7: ("client_e2e_passed", "update_center_client_e2e_passed", "privacy_notice_ready"),
@@ -839,7 +839,6 @@ def _validate_gate_dependencies(
         "telemetry_app_version_online_verified": (
             "telemetry_app_version_verified",
             "function_deployed",
-            "collection_admin_only",
             "route_deployed",
         ),
         "app_display_name_registered": ("profile_complete", "app_id_confirmed"),
@@ -855,8 +854,6 @@ def _validate_gate_dependencies(
         "route_deployed": ("function_deployed",),
         "online_e2e_passed": (
             "function_deployed",
-            "collection_created",
-            "collection_admin_only",
             "route_deployed",
         ),
         "client_e2e_passed": ("client_integration_complete",),

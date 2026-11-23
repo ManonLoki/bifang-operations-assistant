@@ -92,12 +92,14 @@ function createHandler(options = {}) {
     applications?.map(({ appId }) => appId) || [],
   );
   const fixedRepository = options.repository;
+  const sharedReadCache = options.readCache || new Map();
   const repositoryFactory =
     options.repositoryFactory ||
     ((runtimeContext) =>
       createCloudBaseRepository({
         resources: applications,
         runtimeContext,
+        cache: sharedReadCache,
       }));
   const checkRate = options.rateLimiter || createRateLimiter();
   const now = options.now || (() => new Date());
