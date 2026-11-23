@@ -208,6 +208,14 @@ Profile 只记录 `update_center_auth_status` 和已确认的 `offline_enforceme
 
 本 Skill 不从运营精灵仓库扫描或修改未知客户端；接入始终由目标客户端自己的 Task 发起。规范一句话不允许修改第二个客户端或运营精灵仓库。
 
+## 存量 CloudBase 环境升级（PostgreSQL 切云存储与止血）
+
+当已有项目曾使用旧版 Skill 在 CloudBase（尤其是体验版 3,000 点/月环境）部署了 PostgreSQL 版云函数或 `cleanup-*` 定时清理函数时，可按 [存量环境升级与 PostgreSQL 清理](references/cloudbase-gates.md#存量环境升级到云存储止血与清理-postgresql) 在不改动已发布客户端代码的前提下完成无感升级：
+
+1. 使用仓库固定 CLI（`./node_modules/.bin/tcb login`）登录后，先只读枚举环境、云函数、触发器与路由，重点排查定时触发器（如每 15 分钟唤醒 PostgreSQL 的 `cleanup-*` 函数）。
+2. 向负责人展示精确目标（待删定时触发器/清理函数、待仅更新代码的业务云函数、是否清理旧 PostgreSQL 表及 0 付费确认）并等待明确“继续”。
+3. 删除 `cleanup-*` 定时触发器与清理函数，再进入各函数独立目录用 `--dir . --deployMode zip` 仅更新 `telemetry-*`、`application-version-api`、`operations-dashboard-api` 代码（严格保留线上原有环境变量与路由），并复核 `tcb fn list` 全部为 `Deployment completed`。
+
 ## 完成标准
 
 先报告第一门禁选择、第二门禁授权/所选配置获取的脱敏证据、第三门禁正文完整请求明细、客户确认依据、分项/联合方案结论与实施清单、第四门禁适用 UI 的展示/客户确认依据、本地验收证据及未执行项、自动识别和默认值来源，以及准确部署缺项。不得输出完整配置/令牌，不能把阅读合同当真实取配置；一分支通过不代表联合通过，后台未就绪不表示线上验证。

@@ -120,11 +120,43 @@ Application-version 全环境共享：
 
 删除后重新验证：新 version API、两个 telemetry 路由和运营看板正常；旧路由不存在，已列对象返回 404。任何超出精确 allowlist 的数据删除需要新授权。
 
+## 存量环境升级到云存储（止血与清理 PostgreSQL）
+
+适用于已使用旧版 Skill 部署到 CloudBase（尤其是体验版 3,000 点/月环境）的存量项目。整个升级**无需修改或重新发布任何业务客户端**，所有既有接口 URL、鉴权头与响应格式保持不变。
+
+### 1. 只读预检（不执行任何写入或删除）
+
+使用仓库固定 CLI 登录（`./node_modules/.bin/tcb login`），先执行纯只读枚举：
+
+- `./node_modules/.bin/tcb env list --json`：确认目标 `envId` 与套餐状态（不得创建新环境、不得升级或开启超限按量）。
+- `./node_modules/.bin/tcb fn list -e <envId> --limit 100 --json`：列出全部线上云函数，重点识别历史定时清理函数（如 `cleanup-<app_id>`）以及业务函数（`telemetry-<app_id>`、`application-version-api`、`operations-dashboard-api`）。
+- `./node_modules/.bin/tcb fn detail <fnName> -e <envId> --json`：核对触发器（`Triggers`，脱敏处理环境变量，不回显密钥/Token/哈希）与 `AvailableStatus`。
+- `./node_modules/.bin/tcb routes list -e <envId> --limit 100 --json`：确认既有 HTTP 路由。
+
+### 2. 展示最终目标并等待明确“继续”
+
+向负责人逐项展示：目标 `envId`、待删除的定时触发器与 `cleanup-*` 函数名、待仅更新代码的业务云函数列表（明确承诺保留原环境变量与路由）、历史 PostgreSQL 集合是否清理（不迁移或另行导出）、以及 0 付费红线。未收到明确“继续”前不执行任何写入或删除。
+
+### 3. 精确执行顺序
+
+1. **立即止血（删除定时唤醒源）**：
+   - `./node_modules/.bin/tcb fn trigger delete <cleanupFn> <triggerName> -e <envId> --json`
+   - `./node_modules/.bin/tcb fn delete <cleanupFn> -e <envId> --json`
+2. **仅更新业务云函数代码（严禁在仓库根目录直接打包，严禁覆盖线上环境变量与路由）**：
+   - 必须先 `cd` 进入各云函数独立目录，再使用 `--dir . --deployMode zip` 上传，避免 CLI 误将仓库根目录打包导致 `InvalidParameter.ZipCodeFmt` 或超过 1.5MB 限制：
+     - `telemetry-<app_id>`：在 `cloudbase/functions/telemetry` 目录执行 `../../../node_modules/.bin/tcb fn code update telemetry-<app_id> --dir . --deployMode zip -e <envId> --json`
+     - `application-version-api`：在 `cloudbase/functions/application-version-api` 目录执行 `../../../node_modules/.bin/tcb fn code update application-version-api --dir . --deployMode zip -e <envId> --json`
+     - `operations-dashboard-api`：在 `cloudbase/functions/operations-dashboard` 目录执行 `../../../node_modules/.bin/tcb fn code update operations-dashboard-api --dir . --deployMode zip -e <envId> --json`
+3. **清理历史 PostgreSQL 表（按负责人授权，不销毁环境）**：
+   - 历史数据不迁移时，仅清理已确认归属的旧业务集合/表（`telemetry_*`、`versions_*`、`ads_*`、`audit_*`）以释放存储占用；**绝不销毁整个 CloudBase 环境**。
+   - 若实例当前已因额度耗尽处于 `Isolated` 状态（本身 0 CU 消耗），跳过 SQL 清理并如实回报，待下周期额度恢复后按需在控制台清理即可。
+4. **更新后只读复核**：
+   - 重新运行 `tcb fn list` 与 `tcb routes list`，确认 `cleanup-*` 已消失、全部业务函数状态为 `Deployment completed` 且原有路由完整保留。
+
 ## 绝不删除
 
-- `telemetry-bifang-mouse-clicker`、`telemetry-bifang-screen-recorder`；
-- 两条 `/apps/<app_id>/v1/track`；
-- 两个 `telemetry_*` 集合及历史 daily-active 数据；
-- `application-version-api`、单层 v1 路由、六个 versions/ads/audit 集合；
-- `operations-dashboard-api` 与 `/admin/v1/metrics`；
-- 其他应用或未知归属资源。
+- CloudBase 环境本身（切勿为清理 PostgreSQL 而销毁环境）；
+- `telemetry-*` 云函数、`/apps/<app_id>/v1/track` 路由及云存储 `telemetry/<app_id>/` 数据；
+- `application-version-api`、单层 `/tools/version-control/v1` 路由及云存储 `version-control/<app_id>/` 数据；
+- `operations-dashboard-api`、`/admin/v1/metrics` 与 `/dashboard` 路由；
+- 其他应用或未知归属资源（历史 PostgreSQL 集合仅在完成云存储切换并获负责人明确授权后方可精确清理）。
